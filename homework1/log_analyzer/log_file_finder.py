@@ -1,5 +1,6 @@
 import os
 
+
 class LogFileFinder:
     log_dir = None
 
