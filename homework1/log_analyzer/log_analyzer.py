@@ -11,7 +11,7 @@ from statistic import Statistic
 from template_writer import write_report_to_template
 import datetime
 import time
-from tests.test_parser import TestParser
+from tests.test_analyser import TestParser
 
 
 @log_exceptions

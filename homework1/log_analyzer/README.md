@@ -9,5 +9,10 @@ python log_analyser.py --config=config.json
     "REPORT_DIR": "./reports",
     "LOG_DIR": "./logs",
     "MONITORING_FILE": "./monitoring.log",
-    "TS_FILE": "log_analyser.ts"
+    "TS_FILE": "./log_analyser.ts"
 }
+
+
+
+Для запуска тестов необходимо выполнить команду:
+python -m unittest tests.test_analyser

@@ -8,7 +8,7 @@ class Config:
     report_dir = "./reports"
     log_dir = "./logs"
     monitoring_file = './monitoring.log'
-    ts_file = 'log_analyser.ts'
+    ts_file = './log_analyser.ts'
 
     default_config_filename = 'config.json'
     sys_arg_name_of_config_filename = '--config'
