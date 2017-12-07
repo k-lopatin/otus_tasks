@@ -7,7 +7,8 @@ class Config:
     report_size = 1000
     report_dir = "./reports"
     log_dir = "./logs"
-    monitoring_dir = './monitoring'
+    monitoring_file = './monitoring.log'
+    ts_file = 'log_analyser.ts'
 
     default_config_filename = 'config.json'
     sys_arg_name_of_config_filename = '--config'
@@ -35,5 +36,7 @@ class Config:
             self.report_dir = self.json_config['REPORT_DIR']
         if 'LOG_DIR' in self.json_config:
             self.log_dir = self.json_config['LOG_DIR']
-        if 'MONITORING_DIR' in self.json_config:
-            self.monitoring_dir = self.json_config['MONITORING_DIR']
+        if 'MONITORING_FILE' in self.json_config:
+            self.monitoring_file = self.json_config['MONITORING_FILE']
+        if 'TS_FILE' in self.json_config:
+            self.ts_file = self.json_config['TS_FILE']

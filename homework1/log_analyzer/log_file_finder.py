@@ -11,4 +11,4 @@ class LogFileFinder:
 
     def get_config_file(self):
         files = os.listdir(self.log_dir)
-        return os.path.join(self.log_dir, files[0])
+        return os.path.join(self.log_dir, files[1])
