@@ -10,4 +10,4 @@ python log_analyser.py --config=config.json
     "LOG_DIR": "./logs",
     "MONITORING_FILE": "./monitoring.log",
     "TS_FILE": "log_analyser.ts"
-}  
+}

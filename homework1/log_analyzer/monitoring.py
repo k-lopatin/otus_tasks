@@ -1,5 +1,5 @@
 import logging
-import time
+import os
 from log_analyzer_exception import LogAnalyzerException
 
 
@@ -19,7 +19,13 @@ def log_exceptions(fn):
     return wrapper
 
 
-def write_ts_file(ts_file_name):
-    now = str(time.time())
+def get_ts_file(ts_file_name):
+    if not os.path.isfile(ts_file_name):
+        return None
+    with open(ts_file_name, 'r') as ts_file:
+        return ts_file.read()
+
+
+def write_ts_file(ts_file_name, start_time):
     with open(ts_file_name, 'w') as ts_file:
-        ts_file.write(now)
+        ts_file.write(str(start_time))
