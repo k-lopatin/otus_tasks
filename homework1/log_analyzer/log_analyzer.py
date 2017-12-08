@@ -1,41 +1,316 @@
 # %load log_analyzer.py
 #!/usr/bin/env python
 
-from config import Config
-from reader import Reader
+import json
 import logging
-from log_analyzer_exception import LogAnalyzerException
-from log_file_finder import LogFileFinder
-from monitoring import log_exceptions, write_ts_file, set_monitoring_file, get_ts_file
-from statistic import Statistic
-from template_writer import write_report_to_template
+import os
 import datetime
 import time
-from tests.test_analyser import TestParser
+import sys
+import gzip
+
+
+class LogAnalyzerException(Exception):
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return repr(self.value)
+
+
+class LogInfo:
+    api = ''
+    time = 0
+    minimum_api_length = 3
+
+    def __init__(self, api, time, stri):
+        self.set_api(api, stri)
+        self.set_time(time)
+
+    def set_time(self, time):
+        try:
+            time = float(time)
+            if time < 0:
+                raise LogAnalyzerException('Incorrect time format: ' + str(time))
+            self.time = time
+        except ValueError:
+            raise LogAnalyzerException('Incorrect time format: ' + str(time))
+
+    def set_api(self, api, stri):
+        if len(api) < self.minimum_api_length or api[0] != '/':
+            raise LogAnalyzerException('Incorrect api format: ' + str(api) + ' ' + stri)
+        self.api = api
+
+
+class LogFileFinder:
+    log_dir = None
+    date_of_last_analysis = None
+    LOG_FILE_STARTSWITH = 'nginx-access-ui.log-'
+
+    def __init__(self, log_dir, date_of_last_analysis):
+        if not os.path.exists(log_dir):
+            raise IOError('Directory not found')
+        self.log_dir = log_dir
+        self.date_of_last_analysis = date_of_last_analysis
+
+    def get_config_file(self):
+        files = os.listdir(self.log_dir)
+        for filename in files:
+            full_file_name = os.path.join(self.log_dir, filename)
+            if self.is_file_need_to_be_analysed(full_file_name):
+                return full_file_name
+        return None
+
+    def is_file_need_to_be_analysed(self, filename):
+        return self.LOG_FILE_STARTSWITH in filename and self.is_logfile_later_than_last_analysis(filename)
+
+    def is_logfile_later_than_last_analysis(self, filename):
+        if self.date_of_last_analysis is None:
+            return True
+        return float(os.path.getmtime(filename)) > float(self.date_of_last_analysis)
+
+
+class Reader:
+    file_name = None
+    statistic = None
+    incorrect_logs_threshold = 10
+
+    def __init__(self, file_name, statistics, incorrect_logs_threshold):
+        if not os.path.isfile(file_name):
+            raise IOError('File not found')
+        self.file_name = file_name
+        self.statistic = statistics
+        self.incorrect_logs_threshold = incorrect_logs_threshold
+
+    def read(self):
+        logs_count = 0
+        incorrect_logs_count = 0
+        log_file = self.open_log_file()
+        for log_string in log_file:
+            logs_count += 1
+            log_info = parse_string(log_string)
+            if log_info is None:
+                incorrect_logs_count += 1
+                continue
+            self.statistic.add_api_info(log_info)
+        log_file.close()
+        self.log_processed_apis(logs_count, incorrect_logs_count)
+        self.check_if_too_much_incorrect_logs(logs_count, incorrect_logs_count)
+
+    def open_log_file(self):
+        if self.file_name.endswith(".gz"):
+            return gzip.open(self.file_name, 'rb')
+        else:
+            return open(self.file_name)
+
+    def log_processed_apis(self, logs_count, incorrect_logs_count):
+        unique_apis_number = len(self.statistic.times_by_api)
+        logging.info("{0} logs are processed".format(logs_count))
+        logging.info("{0} logs are incorrectly parsed".format(incorrect_logs_count))
+        logging.info("{0} apis are processed".format(unique_apis_number))
+
+    def check_if_too_much_incorrect_logs(self, logs_count, incorrect_logs_count):
+        incorrect_percent = round((float(incorrect_logs_count) / float(logs_count)) * 100.0 + 0.5)
+        if incorrect_percent > self.incorrect_logs_threshold:
+            raise LogAnalyzerException('Too much incorrect logs that cannot be parsed')
+
+
+class Statistic:
+
+    report_size = 1000
+
+    times_by_api = {}
+    count_by_api = {}
+    count_percent_by_api = {}
+    time_avg_by_api = {}
+    time_med_by_api = {}
+    time_max_by_api = {}
+    time_sum_by_api = {}
+    time_percent_by_api = {}
+
+    def __init__(self, report_size):
+        if report_size > 0:
+            self.report_size = report_size
+
+    def add_api_info(self, log_info):
+        if log_info is None:
+            return
+        if log_info.api in self.times_by_api:
+            self.times_by_api[log_info.api].append(log_info.time)
+        else:
+            self.times_by_api[log_info.api] = [log_info.time]
+
+    def get_full_json(self):
+        self.count_params()
+        apis = self.get_longest_apis()
+        full_info = []
+        for api in apis:
+            full_info.append(self.get_info_for_api(api))
+        return json.dumps(full_info)
+
+    def count_params(self):
+        for api, times in self.times_by_api.items():
+            self.count_by_api[api] = len(times)
+            times_sum = sum(times)
+            self.time_sum_by_api[api] = times_sum
+            self.time_avg_by_api[api] = times_sum / len(times)
+            self.time_med_by_api[api] = count_median(times)
+            self.time_max_by_api[api] = max(times)
+        self.count_percent_params()
+
+    def count_percent_params(self):
+        sum_count = sum(self.count_by_api.values())
+        for api, count in self.count_by_api.iteritems():
+            self.count_percent_by_api[api] = (float(count) / float(sum_count)) * 100
+
+        sum_time = sum(self.time_sum_by_api.values())
+        for api, count in self.time_sum_by_api.iteritems():
+            self.time_percent_by_api[api] = (float(count) / float(sum_time)) * 100
+
+    def get_longest_apis(self):
+        sorted_apis = sorted(self.time_avg_by_api, key=self.time_avg_by_api.get, reverse=True)
+        return sorted_apis[0:self.report_size]
+
+    def get_info_for_api(self, api):
+        return {
+            "count": self.count_by_api[api],
+            "time_avg": self.time_avg_by_api[api],
+            "time_max": self.time_max_by_api[api],
+            "time_sum": self.time_sum_by_api[api],
+            "url": api,
+            "time_med": self.time_med_by_api[api],
+            "time_perc": self.time_percent_by_api[api],
+            "count_perc": self.count_percent_by_api[api]
+        }
+
+
+def count_median(numbers_list):
+    numbers_list = sorted(numbers_list)
+    return numbers_list[len(numbers_list) / 2]
+
+
+def set_monitoring_file(monitoring_file):
+    if len(monitoring_file) > 0:
+        logging.basicConfig(filename=monitoring_file, level=logging.DEBUG)
+
+
+def log_exceptions(fn):
+    def wrapper(*args):
+        try:
+            return fn(*args)
+        except LogAnalyzerException as exception:
+            logging.error("Error in log analyser: {0}".format(exception))
+        except Exception as exception:
+            logging.exception("Fatal error: {0}".format(exception))
+        except BaseException as exception:
+            logging.exception("Fatal error: {0}".format(exception))
+    return wrapper
+
+
+def get_ts_file(ts_file_name):
+    if not os.path.isfile(ts_file_name):
+        return None
+    with open(ts_file_name, 'r') as ts_file:
+        return ts_file.read()
+
+
+def write_ts_file(ts_file_name, start_time):
+    with open(ts_file_name, 'w') as ts_file:
+        ts_file.write(str(start_time))
+
+
+position_of_time_in_log_string = -1
+position_of_api_in_log_string = 6
+
+
+def parse_string(log_str):
+    splitted_log_str = log_str.split()
+    try:
+        log_info = LogInfo(
+            api=splitted_log_str[position_of_api_in_log_string],
+            time=splitted_log_str[position_of_time_in_log_string],
+            stri=log_str
+        )
+        return log_info
+    except LogAnalyzerException:
+        return None
+
+
+def write_report_to_template(json_data, template_filename, report_filename):
+    with open(template_filename, 'r') as file:
+        filedata = file.read()
+
+    # Replace the target string
+    filedata = filedata.replace('$table_json', json_data)
+
+    # Write the file out again
+    with open(report_filename, 'w') as report_file:
+        report_file.write(filedata)
+
+
+def get_config_filename():
+    for arg in sys.argv:
+        if arg[0:8] == '--config':
+            return arg[9:]
+    return None
+
+
+def read_config_from_file(conf_filename):
+    try:
+        return json.load(open(conf_filename))
+    except IOError:
+        raise LogAnalyzerException('Incorrect config file')
+
+
+def refill_config(standart_config, file_config):
+    for param_name, param_value in file_config.iteritems():
+        if param_name in standart_config:
+            standart_config[param_name] = param_value
+    return standart_config
+
+
+def redefine_config_from_file(config):
+    config_filename = get_config_filename()
+    if config_filename is None:
+        return config
+    file_config = read_config_from_file(config_filename)
+    return refill_config(config, file_config)
 
 
 @log_exceptions
 def main():
     start_time = time.time()
 
-    # reading config
-    config = Config()
-    config.read_config()
+    config = {
+        'REPORT_SIZE': '1000',
+        'REPORT_DIR': './reports',
+        'LOG_DIR': './logs',
+        'MONITORING_FILE': './monitoring.log',
+        'TS_FILE': './log_analyser.ts',
+        'INCORRECT_LOGS_THRESHOLD': '10'  # in percent
+    }
 
-    set_monitoring_file(config.monitoring_file)
+    # redefining parameters of config from config file
+    try:
+        config = redefine_config_from_file(config)
+    except LogAnalyzerException:
+        set_monitoring_file(config['MONITORING_FILE'])
+        logging.exception('Config file is set incorrectly. Script will use default parameters.')
 
-    last_monitoring_time = get_ts_file(config.ts_file)
+    set_monitoring_file(config['MONITORING_FILE'])
+
+    last_monitoring_time = get_ts_file(config['TS_FILE'])
 
     # looking for the last nginx log to analyze
-    log_file_finder = LogFileFinder(config.log_dir, last_monitoring_time)
+    log_file_finder = LogFileFinder(config['LOG_DIR'], last_monitoring_time)
     log_file = log_file_finder.get_config_file()
 
     if log_file is None:
-        raise LogAnalyzerException('There is no new config files to analyse')
+        raise LogAnalyzerException('There is no new log files to analyse')
 
     # parsing of nginx log
-    statistic = Statistic(config.report_size)
-    log_reader = Reader(log_file, statistic)
+    statistic = Statistic(config['REPORT_SIZE'])
+    log_reader = Reader(log_file, statistic, config['INCORRECT_LOGS_THRESHOLD'])
     log_reader.read()
 
     # counting of needed statistics and forming json string with the slowest apis
@@ -43,11 +318,11 @@ def main():
 
     # forming a report html file
     now = datetime.datetime.now()
-    report_filename = config.report_dir + '/' + 'report-' + now.strftime("%Y-%m-%d") + '.html'
+    report_filename = config['REPORT_DIR'] + '/' + 'report-' + now.strftime("%Y-%m-%d") + '.html'
     write_report_to_template(json_data, 'template.html', report_filename)
 
     # writing ts-file
-    write_ts_file(config.ts_file, start_time)
+    write_ts_file(config['TS_FILE'], start_time)
 
 
 if __name__ == "__main__":
