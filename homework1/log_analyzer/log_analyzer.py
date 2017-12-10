@@ -4,18 +4,13 @@
 import json
 import logging
 import os
-import datetime
 import time
-import sys
 import gzip
+import argparse
+import re
 
 
-class LogAnalyzerException(Exception):
-    def __init__(self, value):
-        self.value = value
-
-    def __str__(self):
-        return repr(self.value)
+LOG_FILE_STARTSWITH = 'nginx-access-ui.log-'
 
 
 class LogInfo:
@@ -31,43 +26,15 @@ class LogInfo:
         try:
             time = float(time)
             if time < 0:
-                raise LogAnalyzerException('Incorrect time format: ' + str(time))
+                raise StandardError('Incorrect time format: ' + str(time))
             self.time = time
         except ValueError:
-            raise LogAnalyzerException('Incorrect time format: ' + str(time))
+            raise StandardError('Incorrect time format: ' + str(time))
 
     def set_api(self, api, stri):
         if len(api) < self.minimum_api_length or api[0] != '/':
-            raise LogAnalyzerException('Incorrect api format: ' + str(api) + ' ' + stri)
+            raise StandardError('Incorrect api format: ' + str(api) + ' ' + stri)
         self.api = api
-
-
-class LogFileFinder:
-    log_dir = None
-    date_of_last_analysis = None
-    LOG_FILE_STARTSWITH = 'nginx-access-ui.log-'
-
-    def __init__(self, log_dir, date_of_last_analysis):
-        if not os.path.exists(log_dir):
-            raise IOError('Directory not found')
-        self.log_dir = log_dir
-        self.date_of_last_analysis = date_of_last_analysis
-
-    def get_config_file(self):
-        files = os.listdir(self.log_dir)
-        for filename in files:
-            full_file_name = os.path.join(self.log_dir, filename)
-            if self.is_file_need_to_be_analysed(full_file_name):
-                return full_file_name
-        return None
-
-    def is_file_need_to_be_analysed(self, filename):
-        return self.LOG_FILE_STARTSWITH in filename and self.is_logfile_later_than_last_analysis(filename)
-
-    def is_logfile_later_than_last_analysis(self, filename):
-        if self.date_of_last_analysis is None:
-            return True
-        return float(os.path.getmtime(filename)) > float(self.date_of_last_analysis)
 
 
 class Reader:
@@ -87,6 +54,7 @@ class Reader:
         incorrect_logs_count = 0
         log_file = self.open_log_file()
         for log_string in log_file:
+            log_string = log_string.decode('utf8')
             logs_count += 1
             log_info = parse_string(log_string)
             if log_info is None:
@@ -112,7 +80,7 @@ class Reader:
     def check_if_too_much_incorrect_logs(self, logs_count, incorrect_logs_count):
         incorrect_percent = round((float(incorrect_logs_count) / float(logs_count)) * 100.0 + 0.5)
         if incorrect_percent > self.incorrect_logs_threshold:
-            raise LogAnalyzerException('Too much incorrect logs that cannot be parsed')
+            raise StandardError('Too much incorrect logs that cannot be parsed')
 
 
 class Statistic:
@@ -130,7 +98,7 @@ class Statistic:
 
     def __init__(self, report_size):
         if report_size > 0:
-            self.report_size = report_size
+            self.report_size = int(report_size)
 
     def add_api_info(self, log_info):
         if log_info is None:
@@ -198,8 +166,8 @@ def log_exceptions(fn):
     def wrapper(*args):
         try:
             return fn(*args)
-        except LogAnalyzerException as exception:
-            logging.error("Error in log analyser: {0}".format(exception))
+        except StandardError as exception:
+            logging.exception("Error in log analyser: {0}".format(exception))
         except Exception as exception:
             logging.exception("Fatal error: {0}".format(exception))
         except BaseException as exception:
@@ -232,7 +200,7 @@ def parse_string(log_str):
             stri=log_str
         )
         return log_info
-    except LogAnalyzerException:
+    except StandardError:
         return None
 
 
@@ -248,33 +216,54 @@ def write_report_to_template(json_data, template_filename, report_filename):
         report_file.write(filedata)
 
 
-def get_config_filename():
-    for arg in sys.argv:
-        if arg[0:8] == '--config':
-            return arg[9:]
-    return None
-
-
 def read_config_from_file(conf_filename):
     try:
         return json.load(open(conf_filename))
     except IOError:
-        raise LogAnalyzerException('Incorrect config file')
+        raise StandardError('Incorrect config file')
 
 
-def refill_config(standart_config, file_config):
-    for param_name, param_value in file_config.iteritems():
-        if param_name in standart_config:
-            standart_config[param_name] = param_value
-    return standart_config
-
-
-def redefine_config_from_file(config):
-    config_filename = get_config_filename()
-    if config_filename is None:
+def redefine_config_from_file(config, config_filename):
+    if config_filename is False:
         return config
     file_config = read_config_from_file(config_filename)
-    return refill_config(config, file_config)
+    config.update(file_config)
+    return config
+
+
+def get_latest_log_file(log_dir):
+    if not os.path.exists(log_dir):
+        raise IOError('Directory not found')
+    files = os.listdir(log_dir)
+    latest_filename = None
+    latest_date = 0
+    for filename in files:
+        full_file_name = os.path.join(log_dir, filename)
+        if LOG_FILE_STARTSWITH in filename:
+            file_date = get_date_of_file(filename)
+            if file_date > latest_date:
+                latest_filename = full_file_name
+                latest_date = file_date
+    if latest_date == 0:
+        return None
+    return latest_filename, latest_date
+
+
+def get_date_of_file(filename):
+    dates = re.findall(r'\d+', filename)
+    if len(dates) > 0:
+        return int(dates[0])
+
+
+def check_if_report_exist(report_dir, log_date):
+    if not os.path.exists(report_dir):
+        return False
+    files = os.listdir(report_dir)
+    for filename in files:
+        file_date = get_date_of_file(filename)
+        if file_date == log_date:
+            return True
+    return False
 
 
 @log_exceptions
@@ -290,23 +279,26 @@ def main():
         'INCORRECT_LOGS_THRESHOLD': '10'  # in percent
     }
 
+    # Reading config filename from command line arguments
+    parser = argparse.ArgumentParser(description='Process config file.')
+    parser.add_argument('--config', help='File with configuration params')
+    config_filename = parser.parse_args().config
+
     # redefining parameters of config from config file
     try:
-        config = redefine_config_from_file(config)
-    except LogAnalyzerException:
+        if config_filename is not None:
+            config = redefine_config_from_file(config, config_filename)
+    except Exception:
         set_monitoring_file(config['MONITORING_FILE'])
-        logging.exception('Config file is set incorrectly. Script will use default parameters.')
+        logging.exception('Config file is set incorrectly.')
+        return
 
     set_monitoring_file(config['MONITORING_FILE'])
 
-    last_monitoring_time = get_ts_file(config['TS_FILE'])
-
     # looking for the last nginx log to analyze
-    log_file_finder = LogFileFinder(config['LOG_DIR'], last_monitoring_time)
-    log_file = log_file_finder.get_config_file()
-
-    if log_file is None:
-        raise LogAnalyzerException('There is no new log files to analyse')
+    log_file, log_file_date = get_latest_log_file(config['LOG_DIR'])
+    if log_file is None or check_if_report_exist(config['REPORT_DIR'], log_file_date):
+        raise StandardError('There is no new log files to analyse')
 
     # parsing of nginx log
     statistic = Statistic(config['REPORT_SIZE'])
@@ -317,8 +309,7 @@ def main():
     json_data = statistic.get_full_json()
 
     # forming a report html file
-    now = datetime.datetime.now()
-    report_filename = config['REPORT_DIR'] + '/' + 'report-' + now.strftime("%Y-%m-%d") + '.html'
+    report_filename = config['REPORT_DIR'] + '/' + 'report-' + str(log_file_date) + '.html'
     write_report_to_template(json_data, 'template.html', report_filename)
 
     # writing ts-file
