@@ -8,12 +8,13 @@ import time
 import gzip
 import argparse
 import re
+import collections
 
 
 LOG_FILE_STARTSWITH = 'nginx-access-ui.log-'
 
 
-class LogInfo:
+class LogInfo(object):
     api = ''
     time = 0
     minimum_api_length = 3
@@ -37,33 +38,28 @@ class LogInfo:
         self.api = api
 
 
-class Reader:
+class Reader(object):
     file_name = None
-    statistic = None
-    incorrect_logs_threshold = 10
 
-    def __init__(self, file_name, statistics, incorrect_logs_threshold):
+    logs_count = 0
+    incorrect_logs_count = 0
+
+    def __init__(self, file_name):
         if not os.path.isfile(file_name):
             raise IOError('File not found')
         self.file_name = file_name
-        self.statistic = statistics
-        self.incorrect_logs_threshold = incorrect_logs_threshold
 
     def read(self):
-        logs_count = 0
-        incorrect_logs_count = 0
         log_file = self.open_log_file()
         for log_string in log_file:
             log_string = log_string.decode('utf8')
-            logs_count += 1
+            self.logs_count += 1
             log_info = parse_string(log_string)
             if log_info is None:
-                incorrect_logs_count += 1
+                self.incorrect_logs_count += 1
                 continue
-            self.statistic.add_api_info(log_info)
+            yield log_info
         log_file.close()
-        self.log_processed_apis(logs_count, incorrect_logs_count)
-        self.check_if_too_much_incorrect_logs(logs_count, incorrect_logs_count)
 
     def open_log_file(self):
         if self.file_name.endswith(".gz"):
@@ -71,21 +67,8 @@ class Reader:
         else:
             return open(self.file_name)
 
-    def log_processed_apis(self, logs_count, incorrect_logs_count):
-        unique_apis_number = len(self.statistic.times_by_api)
-        logging.info("{0} logs are processed".format(logs_count))
-        logging.info("{0} logs are incorrectly parsed".format(incorrect_logs_count))
-        logging.info("{0} apis are processed".format(unique_apis_number))
 
-    def check_if_too_much_incorrect_logs(self, logs_count, incorrect_logs_count):
-        incorrect_percent = round((float(incorrect_logs_count) / float(logs_count)) * 100.0 + 0.5)
-        if incorrect_percent > self.incorrect_logs_threshold:
-            raise StandardError('Too much incorrect logs that cannot be parsed')
-
-
-class Statistic:
-
-    report_size = 1000
+class Statistic(object):
 
     times_by_api = {}
     count_by_api = {}
@@ -96,10 +79,6 @@ class Statistic:
     time_sum_by_api = {}
     time_percent_by_api = {}
 
-    def __init__(self, report_size):
-        if report_size > 0:
-            self.report_size = int(report_size)
-
     def add_api_info(self, log_info):
         if log_info is None:
             return
@@ -107,14 +86,6 @@ class Statistic:
             self.times_by_api[log_info.api].append(log_info.time)
         else:
             self.times_by_api[log_info.api] = [log_info.time]
-
-    def get_full_json(self):
-        self.count_params()
-        apis = self.get_longest_apis()
-        full_info = []
-        for api in apis:
-            full_info.append(self.get_info_for_api(api))
-        return json.dumps(full_info)
 
     def count_params(self):
         for api, times in self.times_by_api.items():
@@ -135,21 +106,63 @@ class Statistic:
         for api, count in self.time_sum_by_api.iteritems():
             self.time_percent_by_api[api] = (float(count) / float(sum_time)) * 100
 
+
+class Analyzer(object):
+
+    def __init__(self, reader, statistic, report_size, incorrect_logs_threshold):
+        self.reader = reader
+        self.statistic = statistic
+
+        if 0 <= int(incorrect_logs_threshold) <= 100:
+            self.incorrect_logs_threshold = int(incorrect_logs_threshold)
+        else:
+            raise ValueError('Incorrect logs threshold')
+
+        if report_size > 0:
+            self.report_size = int(report_size)
+        else:
+            raise ValueError('Incorrect report size')
+
+    def create_report(self):
+        for log_info in self.reader.read():
+            self.statistic.add_api_info(log_info)
+        self.statistic.count_params()
+        self.log_processed_apis()
+        return self.get_full_json()
+
+    def get_full_json(self):
+        apis = self.get_longest_apis()
+        full_info = []
+        for api in apis:
+            full_info.append(self.get_info_for_api(api))
+        return json.dumps(full_info)
+
     def get_longest_apis(self):
-        sorted_apis = sorted(self.time_avg_by_api, key=self.time_avg_by_api.get, reverse=True)
+        sorted_apis = sorted(self.statistic.time_avg_by_api, key=self.statistic.time_avg_by_api.get, reverse=True)
         return sorted_apis[0:self.report_size]
 
     def get_info_for_api(self, api):
         return {
-            "count": self.count_by_api[api],
-            "time_avg": self.time_avg_by_api[api],
-            "time_max": self.time_max_by_api[api],
-            "time_sum": self.time_sum_by_api[api],
+            "count": self.statistic.count_by_api[api],
+            "time_avg": self.statistic.time_avg_by_api[api],
+            "time_max": self.statistic.time_max_by_api[api],
+            "time_sum": self.statistic.time_sum_by_api[api],
             "url": api,
-            "time_med": self.time_med_by_api[api],
-            "time_perc": self.time_percent_by_api[api],
-            "count_perc": self.count_percent_by_api[api]
+            "time_med": self.statistic.time_med_by_api[api],
+            "time_perc": self.statistic.time_percent_by_api[api],
+            "count_perc": self.statistic.count_percent_by_api[api]
         }
+
+    def log_processed_apis(self):
+        unique_apis_number = len(self.statistic.times_by_api)
+        logging.info("{0} logs are processed".format(self.reader.logs_count))
+        logging.info("{0} logs are incorrectly parsed".format(self.reader.incorrect_logs_count))
+        logging.info("{0} apis are processed".format(unique_apis_number))
+
+    def check_if_too_much_incorrect_logs(self, logs_count, incorrect_logs_count):
+        incorrect_percent = round((float(incorrect_logs_count) / float(logs_count)) * 100.0 + 0.5)
+        if incorrect_percent > self.incorrect_logs_threshold:
+            raise StandardError('Too much incorrect logs that cannot be parsed')
 
 
 def count_median(numbers_list):
@@ -246,7 +259,8 @@ def get_latest_log_file(log_dir):
                 latest_date = file_date
     if latest_date == 0:
         return None
-    return latest_filename, latest_date
+    LatestFile = collections.namedtuple('LatestFilename', ['filename', 'date'])
+    return LatestFile(filename=latest_filename, date=latest_date)
 
 
 def get_date_of_file(filename):
@@ -256,14 +270,55 @@ def get_date_of_file(filename):
 
 
 def check_if_report_exist(report_dir, log_date):
-    if not os.path.exists(report_dir):
-        return False
-    files = os.listdir(report_dir)
-    for filename in files:
-        file_date = get_date_of_file(filename)
-        if file_date == log_date:
-            return True
-    return False
+    report_filename = generate_report_filename(report_dir, log_date)
+    return os.path.exists(report_filename)
+
+
+def generate_report_filename(report_dir, report_date):
+    return report_dir + '/' + 'report-' + str(report_date) + '.html'
+
+
+def create_report(nginx_log_filename, config):
+    statistic = Statistic()
+    log_reader = Reader(nginx_log_filename)
+    analyser = Analyzer(
+        reader=log_reader,
+        statistic=statistic,
+        report_size=config['REPORT_SIZE'],
+        incorrect_logs_threshold=config['INCORRECT_LOGS_THRESHOLD']
+    )
+    return analyser.create_report()
+
+
+def write_report_html(report_json, date, config):
+    report_filename = generate_report_filename(config['REPORT_DIR'], date)
+    write_report_to_template(report_json, 'template.html', report_filename)
+
+
+def get_config_filename_from_command_line_args():
+    parser = argparse.ArgumentParser(description='Process config file.')
+    parser.add_argument('--config', help='File with configuration params')
+    return parser.parse_args().config
+
+
+def try_redefine_config_from_file(config):
+    config_filename = get_config_filename_from_command_line_args()
+    try:
+        if config_filename is not None:
+            return redefine_config_from_file(config, config_filename)
+        else:
+            return config
+    except Exception:
+        set_monitoring_file(config['MONITORING_FILE'])
+        raise Exception('Config file is set incorrectly.')
+
+
+def try_get_latest_log_file_which_has_no_report(config):
+    latest_log_file = get_latest_log_file(config['LOG_DIR'])
+    if latest_log_file.filename is None \
+            or check_if_report_exist(config['REPORT_DIR'], latest_log_file.date):
+        raise StandardError('There is no new log files to analyse')
+    return latest_log_file
 
 
 @log_exceptions
@@ -279,40 +334,16 @@ def main():
         'INCORRECT_LOGS_THRESHOLD': '10'  # in percent
     }
 
-    # Reading config filename from command line arguments
-    parser = argparse.ArgumentParser(description='Process config file.')
-    parser.add_argument('--config', help='File with configuration params')
-    config_filename = parser.parse_args().config
-
-    # redefining parameters of config from config file
-    try:
-        if config_filename is not None:
-            config = redefine_config_from_file(config, config_filename)
-    except Exception:
-        set_monitoring_file(config['MONITORING_FILE'])
-        logging.exception('Config file is set incorrectly.')
-        return
+    config = try_redefine_config_from_file(config)
 
     set_monitoring_file(config['MONITORING_FILE'])
 
-    # looking for the last nginx log to analyze
-    log_file, log_file_date = get_latest_log_file(config['LOG_DIR'])
-    if log_file is None or check_if_report_exist(config['REPORT_DIR'], log_file_date):
-        raise StandardError('There is no new log files to analyse')
+    latest_log_file = try_get_latest_log_file_which_has_no_report(config)
 
-    # parsing of nginx log
-    statistic = Statistic(config['REPORT_SIZE'])
-    log_reader = Reader(log_file, statistic, config['INCORRECT_LOGS_THRESHOLD'])
-    log_reader.read()
+    json_data = create_report(latest_log_file.filename, config)
 
-    # counting of needed statistics and forming json string with the slowest apis
-    json_data = statistic.get_full_json()
+    write_report_html(json_data, latest_log_file.date, config)
 
-    # forming a report html file
-    report_filename = config['REPORT_DIR'] + '/' + 'report-' + str(log_file_date) + '.html'
-    write_report_to_template(json_data, 'template.html', report_filename)
-
-    # writing ts-file
     write_ts_file(config['TS_FILE'], start_time)
 
 

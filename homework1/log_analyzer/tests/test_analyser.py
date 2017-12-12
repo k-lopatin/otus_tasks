@@ -1,6 +1,19 @@
 import unittest
-from log_analyzer import parse_string, Statistic, LogInfo
+from log_analyzer import parse_string, Statistic, LogInfo, Analyzer
 import json
+
+
+class MockReader(object):
+    logs_count = 0
+    incorrect_logs_count = 0
+
+    def __init__(self, log_infos):
+        self.log_infos = log_infos
+        self.logs_count = len(log_infos)
+
+    def read(self):
+        for log_info in self.log_infos:
+            yield log_info
 
 
 class TestAnalyser(unittest.TestCase):
@@ -13,21 +26,16 @@ class TestAnalyser(unittest.TestCase):
 
     def test_statistic(self):
         report_size = 2
-        statistic = Statistic(report_size)
-
         log_info1 = LogInfo('/api1', 10, '')
         log_info2 = LogInfo('/api2', 20, '')
         log_info3 = LogInfo('/api3', 30, '')
         log_info4 = LogInfo('/api1', 60, '')
 
-        statistic.add_api_info(log_info1)
-        statistic.add_api_info(log_info2)
-        statistic.add_api_info(log_info3)
-        statistic.add_api_info(log_info4)
+        statistic = Statistic()
+        reader = MockReader([log_info1, log_info2, log_info3, log_info4])
+        analyser = Analyzer(reader, statistic, report_size, 10)
 
-        statistic.count_params()
-
-        full_json = statistic.get_full_json()
+        full_json = analyser.create_report()
         full_json_obj = json.loads(full_json)
 
         self.assertEqual(len(full_json_obj), report_size, 'Report size is incorrect')
