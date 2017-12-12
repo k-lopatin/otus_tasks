@@ -144,7 +144,6 @@ class BirthDayField(DateField):
 
 
 class GenderField(Field):
-    POSSIBLE_VALUES = [0, 1, 2]
 
     def __str__(self):
         return '' if self.value is None else str(self.value)
@@ -152,7 +151,7 @@ class GenderField(Field):
     def validate(self):
         if not self.required and self.nullable and len(str(self)) == 0:
             return True
-        return self.value in self.POSSIBLE_VALUES
+        return self.value in GENDERS.keys()
 
 
 class ClientIDsField(IterableField):
@@ -187,16 +186,8 @@ class BaseRequest(object):
         for field_name, field in self.fields.items():
             if not field.validate():
                 errors += field_name + ' argument is incorrect. '
+        errors += self.additional_validate()
         self.errors = errors
-
-    def execute_api(self):
-        if len(self.errors) > 0:
-            return self.errors, INVALID_REQUEST
-        else:
-            return self.get_api(), OK
-
-    def get_api(self):
-        pass
 
     def additional_validate(self):
         return ''
@@ -210,15 +201,6 @@ class ClientsInterestsRequest(BaseRequest):
         'clients_ids': client_ids,
         'date': date
     }
-
-    def get_api(self):
-        store = {
-            "nclients": self.client_ids.count()
-        }
-        result = {}
-        for client_id in self.client_ids:
-            result[client_id] = get_interests(store, client_id)
-        return result
 
 
 class OnlineScoreRequest(BaseRequest):
@@ -244,23 +226,6 @@ class OnlineScoreRequest(BaseRequest):
         "gender": gender
     }
 
-    def get_api(self):
-        store = {
-            "has": self.get_not_empty_fields()
-        }
-        if self.is_admin:
-            return {"score": 42}
-        return {
-            "score": get_score(store, str(self.phone), str(self.email), str(self.birthday),
-                                    str(self.gender), str(self.first_name), str(self.last_name))
-        }
-
-    def get_not_empty_fields(self):
-        not_empty_fields = []
-        for field_name, field in self.fields.items():
-            if field.count() > 0:
-                not_empty_fields.append(field_name)
-
     def additional_validate(self):
         for pair in self.needed_pairs:
             pair_exist = True
@@ -279,11 +244,6 @@ class MethodRequest(BaseRequest):
     arguments = ArgumentsField(required=True, nullable=True)
     method = CharField(required=True, nullable=False)
 
-    REQUEST_METHOD = {
-        'online_score': OnlineScoreRequest,
-        'clients_interests': ClientsInterestsRequest
-    }
-
     fields = {
         'account': account,
         'login': login,
@@ -292,29 +252,133 @@ class MethodRequest(BaseRequest):
         'method': method
     }
 
+
+class BaseRequestHandler(object):
+
+    def __init__(self, request):
+        self.request = request
+
+    def execute(self):
+        self.request.validate()
+        if len(self.request.errors) > 0:
+            return self.request.errors, INVALID_REQUEST
+
+        store = self.get_store()
+        result = self.get_result(store)
+        return result, OK
+
+    def get_store(self):
+        return None
+
+    def get_result(self, store):
+        return None
+
+
+class ClientsInterestsRequestHandler(BaseRequestHandler):
+
+    def get_store(self):
+        return {
+            "nclients": self.request.client_ids.count()
+        }
+
+    def get_result(self, store):
+        result = {}
+        for client_id in self.request.client_ids:
+            result[client_id] = get_interests(store, client_id)
+        return result
+
+
+class OnlineScoreRequestHandler(BaseRequestHandler):
+
+    def get_store(self):
+        return {
+            "has": self.get_not_empty_fields()
+        }
+
+    def get_result(self, store):
+        if self.request.is_admin:
+            return {"score": 42}
+        return {
+            "score": get_score(store, str(self.request.phone), str(self.request.email), str(self.request.birthday),
+                               str(self.request.gender), str(self.request.first_name), str(self.request.last_name))
+        }
+
+    def get_not_empty_fields(self):
+        not_empty_fields = []
+        for field_name, field in self.request.fields.items():
+            if field.count() > 0:
+                not_empty_fields.append(field_name)
+
+
+class AbstractRequestFactory(object):
+    __metaclass__ = abc.ABCMeta
+
+    def __init__(self, arguments):
+        self.arguments = arguments
+
+    @abc.abstractmethod
+    def create_request(self):
+        pass
+
+    @abc.abstractmethod
+    def create_handler(self, request):
+        pass
+
+
+class OnlineScoreRequestFactory(AbstractRequestFactory):
+    def create_request(self):
+        return OnlineScoreRequest(self.arguments)
+
+    def create_handler(self, request):
+        return OnlineScoreRequestHandler(request)
+
+
+class ClientsInterestsRequestFactory(AbstractRequestFactory):
+
+    def create_request(self):
+        return ClientsInterestsRequest(self.arguments)
+
+    def create_handler(self, request):
+        return ClientsInterestsRequestHandler(request)
+
+
+class MethodRequestHandler(BaseRequestHandler):
+
+    REQUEST_METHOD = {
+        'online_score': OnlineScoreRequestFactory,
+        'clients_interests': ClientsInterestsRequestFactory
+    }
+
     @property
     def is_admin(self):
-        return self.login == ADMIN_LOGIN
+        return self.request.login == ADMIN_LOGIN
 
-    def execute_api(self):
-        if len(self.errors) > 0:
-            return self.errors, INVALID_REQUEST
-        else:
-            return self.get_api()
+    def execute(self):
+        return super(MethodRequestHandler, self).execute()[0]
 
-    def get_api(self):
-        if self.method in self.REQUEST_METHOD:
-            request_object = self.REQUEST_METHOD[self.method](self.arguments)
+    def get_result(self, score):
+        if self.request.method in self.REQUEST_METHOD:
+            request_factory = self.REQUEST_METHOD[self.request.method](self.request.arguments)
+            request = request_factory.create_request()
+            request_handler = request_factory.create_handler(request)
             if self.is_admin:
-                request_object.is_admin = True
+                request.is_admin = True
             try:
-                request_object.validate()
-                return request_object.execute()
+                return request_handler.execute()
             except BaseException as e:
                 logging.exception(e.message)
                 return None, BAD_REQUEST
         else:
             return None, NOT_FOUND
+
+
+class MethodRequestFactory(AbstractRequestFactory):
+
+    def create_request(self):
+        return MethodRequest(self.arguments)
+
+    def create_handler(self, request):
+        return MethodRequestHandler(request)
 
 
 def check_auth(request):
@@ -328,11 +392,14 @@ def check_auth(request):
 
 
 def method_handler(request, ctx, store):
-    method_request = MethodRequest(request['body'])
+
+    method_request_factory = MethodRequestFactory(request['body'])
+    method_request = method_request_factory.create_request()
     if not check_auth(method_request):
         response, code = None, FORBIDDEN
         return response, code
-    return method_request.execute()
+    method_request_handler = method_request_factory.create_handler(method_request)
+    return method_request_handler.execute()
 
 
 class MainHTTPHandler(BaseHTTPRequestHandler):
