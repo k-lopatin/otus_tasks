@@ -139,7 +139,7 @@ class Analyzer(object):
 
     def get_longest_apis(self):
         sorted_apis = sorted(self.statistic.time_avg_by_api, key=self.statistic.time_avg_by_api.get, reverse=True)
-        return sorted_apis[0:self.report_size]
+        return sorted_apis[:self.report_size]
 
     def get_info_for_api(self, api):
         return {
@@ -290,11 +290,6 @@ def create_report(nginx_log_filename, config):
     return analyser.create_report()
 
 
-def write_report_html(report_json, date, config):
-    report_filename = generate_report_filename(config['REPORT_DIR'], date)
-    write_report_to_template(report_json, 'template.html', report_filename)
-
-
 def get_config_filename_from_command_line_args():
     parser = argparse.ArgumentParser(description='Process config file.')
     parser.add_argument('--config', help='File with configuration params')
@@ -311,14 +306,6 @@ def try_redefine_config_from_file(config):
     except Exception:
         set_monitoring_file(config['MONITORING_FILE'])
         raise Exception('Config file is set incorrectly.')
-
-
-def try_get_latest_log_file_which_has_no_report(config):
-    latest_log_file = get_latest_log_file(config['LOG_DIR'])
-    if latest_log_file.filename is None \
-            or check_if_report_exist(config['REPORT_DIR'], latest_log_file.date):
-        raise StandardError('There is no new log files to analyse')
-    return latest_log_file
 
 
 @log_exceptions
@@ -338,11 +325,17 @@ def main():
 
     set_monitoring_file(config['MONITORING_FILE'])
 
-    latest_log_file = try_get_latest_log_file_which_has_no_report(config)
+    latest_log_file = get_latest_log_file(config['LOG_DIR'])
+    report_filename = generate_report_filename(config['REPORT_DIR'], latest_log_file.date)
+
+    if latest_log_file.filename is None \
+            or os.path.exists(report_filename):
+        logging.info('There is no new log files to analyse')
+        return
 
     json_data = create_report(latest_log_file.filename, config)
 
-    write_report_html(json_data, latest_log_file.date, config)
+    write_report_to_template(json_data, 'template.html', report_filename)
 
     write_ts_file(config['TS_FILE'], start_time)
 
