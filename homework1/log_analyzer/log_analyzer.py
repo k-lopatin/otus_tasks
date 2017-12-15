@@ -49,6 +49,9 @@ class Reader(object):
             raise IOError('File not found')
         self.file_name = file_name
 
+    def __iter__(self):
+        return self.read()
+
     def read(self):
         log_file = self.open_log_file()
         for log_string in log_file:
@@ -124,7 +127,7 @@ class Analyzer(object):
             raise ValueError('Incorrect report size')
 
     def create_report(self):
-        for log_info in self.reader.read():
+        for log_info in self.reader:
             self.statistic.add_api_info(log_info)
         self.statistic.count_params()
         self.log_processed_apis()
@@ -269,11 +272,6 @@ def get_date_of_file(filename):
         return int(dates[0])
 
 
-def check_if_report_exist(report_dir, log_date):
-    report_filename = generate_report_filename(report_dir, log_date)
-    return os.path.exists(report_filename)
-
-
 def generate_report_filename(report_dir, report_date):
     return report_dir + '/' + 'report-' + str(report_date) + '.html'
 
@@ -296,13 +294,12 @@ def get_config_filename_from_command_line_args():
     return parser.parse_args().config
 
 
-def try_redefine_config_from_file(config):
-    config_filename = get_config_filename_from_command_line_args()
+def try_redefine_config_from_file(config, default_config_filename):
     try:
-        if config_filename is not None:
-            return redefine_config_from_file(config, config_filename)
-        else:
-            return config
+        actual_config = get_config_filename_from_command_line_args()
+        if actual_config is None:
+            actual_config = default_config_filename
+        return redefine_config_from_file(config, actual_config)
     except Exception:
         set_monitoring_file(config['MONITORING_FILE'])
         raise Exception('Config file is set incorrectly.')
@@ -321,7 +318,9 @@ def main():
         'INCORRECT_LOGS_THRESHOLD': '10'  # in percent
     }
 
-    config = try_redefine_config_from_file(config)
+    default_config_filename = './config.json'
+
+    config = try_redefine_config_from_file(config, default_config_filename)
 
     set_monitoring_file(config['MONITORING_FILE'])
 

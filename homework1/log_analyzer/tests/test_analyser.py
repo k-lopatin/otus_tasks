@@ -11,9 +11,10 @@ class MockReader(object):
         self.log_infos = log_infos
         self.logs_count = len(log_infos)
 
-    def read(self):
+    def __iter__(self):
         for log_info in self.log_infos:
             yield log_info
+
 
 
 class TestAnalyser(unittest.TestCase):
